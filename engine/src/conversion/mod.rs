@@ -28,7 +28,7 @@ use itertools::Itertools;
 use syn::{Item, ItemMod};
 
 use crate::{
-    conversion::analysis::deps::HasDependencies, CppCodegenOptions, CppFilePair, UnsafePolicy,
+    conversion::analysis::deps::HasDependencies, CodegenOptions, CppFilePair, UnsafePolicy,
 };
 
 use self::{
@@ -44,6 +44,7 @@ use self::{
         remove_ignored::filter_apis_by_ignored_dependents,
         replace_hopeless_typedef_targets,
         tdef::convert_typedef_targets,
+        struct_accessors::add_field_accessors,
     },
     api::AnalysisPhase,
     apivec::ApiVec,
@@ -122,7 +123,7 @@ impl<'a> BridgeConverter<'a> {
         mut bindgen_mod: ItemMod,
         unsafe_policy: UnsafePolicy,
         inclusions: String,
-        cpp_codegen_options: &CppCodegenOptions,
+        codegen_options: &CodegenOptions,
         source_file_contents: &str,
     ) -> Result<CodegenResults, ConvertError> {
         match &mut bindgen_mod.content {
@@ -149,6 +150,9 @@ impl<'a> BridgeConverter<'a> {
                 let analyzed_apis =
                     analyze_pod_apis(apis, self.config).map_err(ConvertError::Cpp)?;
                 Self::dump_apis("pod analysis", &analyzed_apis);
+                // Add accessors for class/struct fields. These are necessary to access fields of non-POD types
+                let analyzed_apis = add_field_accessors(analyzed_apis);
+                Self::dump_apis("adding field accessors", &analyzed_apis);
                 let analyzed_apis = replace_hopeless_typedef_targets(self.config, analyzed_apis);
                 let analyzed_apis = add_casts(analyzed_apis);
                 let analyzed_apis = create_alloc_and_frees(analyzed_apis);
@@ -158,8 +162,12 @@ impl<'a> BridgeConverter<'a> {
                 // part of `autocxx`. Again, this returns a new set of `Api`s, but
                 // parameterized by a richer set of metadata.
                 Self::dump_apis("adding casts", &analyzed_apis);
-                let analyzed_apis =
-                    FnAnalyzer::analyze_functions(analyzed_apis, &unsafe_policy, self.config);
+                let analyzed_apis = FnAnalyzer::analyze_functions(
+                    analyzed_apis,
+                    &unsafe_policy,
+                    self.config,
+                    codegen_options.force_wrapper_gen,
+                );
                 // If any of those functions turned out to be pure virtual, don't attempt
                 // to generate UniquePtr implementations for the type, since it can't
                 // be instantiated.
@@ -189,12 +197,15 @@ impl<'a> BridgeConverter<'a> {
                 Self::dump_apis_with_deps("GC", &analyzed_apis);
                 // And finally pass them to the code gen phases, which outputs
                 // code suitable for cxx to consume.
-                let cxxgen_header_name = cpp_codegen_options.cxxgen_header_namer.name_header();
+                let cxxgen_header_name = codegen_options
+                    .cpp_codegen_options
+                    .cxxgen_header_namer
+                    .name_header();
                 let cpp = CppCodeGenerator::generate_cpp_code(
                     inclusions,
                     &analyzed_apis,
                     self.config,
-                    cpp_codegen_options,
+                    &codegen_options.cpp_codegen_options,
                     &cxxgen_header_name,
                 )
                 .map_err(ConvertError::Cpp)?;
